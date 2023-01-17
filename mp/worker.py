@@ -43,10 +43,11 @@ class SelfPlayWorker(Worker):
         worker_index: int,
         num_games: int,
         num_players: int,
-        battle_format: str = "gen8randombattle",
+        battle_format: str = "gen3sampleteamrandbats",
         team: str = None,
         obs_dict=None,
         shared_hash=None,
+        name='p',
     ):
         super().__init__(
             worker_index=worker_index,
@@ -58,6 +59,7 @@ class SelfPlayWorker(Worker):
         self.obs_dict = obs_dict
         self.shared_hash = shared_hash
         self.hash = None
+        self.name = name
 
     def __repr__(self):
         return f"Worker(idx={self.worker_index},num_players={self.num_players})"
@@ -98,7 +100,7 @@ class SelfPlayWorker(Worker):
         """
         Asynchronous actor loop, neccesary for communication with websocket environment
         """
-        username = f"p{player_index}"
+        username = self.name + f'-{player_index}'
 
         player = DeepNashPlayer(
             model=model,
@@ -120,16 +122,17 @@ class SelfPlayWorker(Worker):
                             self.hash = self.shared_hash.value
 
             try:
-                await asyncio.wait_for(player.ladder(1), 3 * 60)
+                await asyncio.wait_for(player.ladder(1), 10 * 60)
 
             except asyncio.TimeoutError:
-                replay_buffer.clean(player.battle_tag)
+                if replay_buffer is not None:
+                    replay_buffer.clean(player.battle_tag)
 
             else:
                 reward = player.get_reward()
-                player.replay_buffer.ammend_reward(
-                    player.battle_tag, player.pid, reward
-                )
-                player.replay_buffer.register_done(player.battle_tag)
-
+                if replay_buffer is not None:
+                    player.replay_buffer.ammend_reward(
+                        player.battle_tag, player.pid, reward
+                    )
+                    player.replay_buffer.register_done(player.battle_tag)
                 player.reset()
