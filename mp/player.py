@@ -378,12 +378,12 @@ class DeepNashPlayer(Player):
 
         policy_text = "".join(
             [
-                f"{MOVES_ITOS[idx.item()]}: {round(p.item(), 3)} "
+                f"{MOVES_ITOS[idx.item()]}: {int(p.item() * 100)} "
                 if _ < 4
-                else f"{POKEDEX_ITOS[idx.item()]}: {round(p.item(), 3)} "
+                else f"{POKEDEX_ITOS[idx.item()]}: {int(p.item() * 100)} "
                 for _, (p, idx, l) in enumerate(
                     zip(
-                        prediction["logits"].view(-1),
+                        prediction["policy"].view(-1),
                         move_switch_index,
                         obs.legal_actions,
                     )
