@@ -83,4 +83,3 @@ def renormalize(loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     loss = torch.sum(loss * mask)
     normalization = torch.sum(mask)
     return loss / normalization.clamp(min=1)
-
