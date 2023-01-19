@@ -47,7 +47,7 @@ class SelfPlayWorker(Worker):
         team: str = None,
         obs_dict=None,
         shared_hash=None,
-        name='p',
+        name="p",
     ):
         super().__init__(
             worker_index=worker_index,
@@ -100,7 +100,7 @@ class SelfPlayWorker(Worker):
         """
         Asynchronous actor loop, neccesary for communication with websocket environment
         """
-        username = self.name + f'-{player_index}'
+        username = self.name + f"-{player_index}"
 
         player = DeepNashPlayer(
             model=model,

@@ -152,7 +152,13 @@ class ReplayBuffer:
                 zip(*sorted(list(zip(lengths.tolist(), indices)), key=lambda x: x[0]))
             )[1]
             indices_by_time = list(
-                zip(*sorted(list(zip(entry_times, indices)), key=lambda x: x[0], reverse=True))
+                zip(
+                    *sorted(
+                        list(zip(entry_times, indices)),
+                        key=lambda x: x[0],
+                        reverse=True,
+                    )
+                )
             )[1]
 
             batch = {

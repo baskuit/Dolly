@@ -25,8 +25,7 @@ class Eval:
             directory_name, m, n = tag
             rnad = RNaD(
                 directory_name=directory_name,
-                net_init_params=
-                {
+                net_init_params={
                     "type": "BasketNet4",
                     "depth_body": 2,
                     "depth_policy_cross": 1,
@@ -53,7 +52,7 @@ class Eval:
 
     def _start_workers(self, n_players_per_worker=1):
         for worker_index in range(self.n_workers):
-            name='-'.join([str(_) for _ in self.tags[worker_index]])
+            name = "-".join([str(_) for _ in self.tags[worker_index]])
             print(name)
             worker = SelfPlayWorker(
                 worker_index=worker_index,
@@ -76,7 +75,7 @@ class Eval:
             process.start()
 
     def run(self, n_players_per_worker=1):
-        self.ctx = mp.get_context('spawn')
+        self.ctx = mp.get_context("spawn")
         self._start_workers(n_players_per_worker=n_players_per_worker)
 
 
