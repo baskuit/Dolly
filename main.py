@@ -17,9 +17,6 @@ from torch import nn
 from torch import optim
 
 from neural.basket import BasketNet
-from neural.basket2 import BasketNet2
-from neural.basket3 import BasketNet3
-from neural.basket4 import BasketNet4
 from neural.buffer_specs import representation_input_buffer_specs
 from neural.buffers import ReplayBuffer
 
@@ -275,12 +272,6 @@ class RNaD:
         # e.g. {'type':'FCResNet', 'tower_length'=8}
         if self.net_init_params["type"] == "BasketNet":
             t = BasketNet
-        if self.net_init_params["type"] == "BasketNet2":
-            t = BasketNet2
-        if self.net_init_params["type"] == "BasketNet3":
-            t = BasketNet3
-        if self.net_init_params["type"] == "BasketNet4":
-            t = BasketNet4
         net_params = {
             key: value for key, value in self.net_init_params.items() if key != "type"
         }
@@ -496,7 +487,7 @@ class RNaD:
                 )
                 # update logs per chunk
                 if self.n % log_mod == 0 and self.wandb:
-                    value_loss_ += value_loss #already multiplied by outside weight"
+                    value_loss_ += value_loss  # already multiplied by outside weight"
                     neurd_loss_ += neurd_loss
                     total_loss_ += total_loss
                     avg_traj_len_ += valid.float().sum(0).mean().item() / n_chunks
@@ -504,21 +495,28 @@ class RNaD:
                         torch.where(
                             valid.unsqueeze(-1).repeat(1, 1, 9),
                             torch.where(
-                                legal_actions, pi * (torch.log(pi) - torch.log(policy)), 0
+                                legal_actions,
+                                pi * (torch.log(pi) - torch.log(policy)),
+                                0,
                             ),
                             torch.zeros_like(legal_actions),
                         )
-                        .sum(-1).mean()
+                        .sum(-1)
+                        .mean()
                         .item()
                         * outside_weight
                     )
                     log_legal = torch.log(
-                        torch.nn.functional.normalize(legal_actions.to(torch.float), dim=-1, p=1)
+                        torch.nn.functional.normalize(
+                            legal_actions.to(torch.float), dim=-1, p=1
+                        )
                     )
                     entropy_ += (
                         torch.where(
                             valid.unsqueeze(-1).repeat(1, 1, 9),
-                            torch.where(legal_actions, pi * (torch.log(pi) - log_legal), 0),
+                            torch.where(
+                                legal_actions, pi * (torch.log(pi) - log_legal), 0
+                            ),
                             torch.zeros_like(legal_actions),
                         )
                     ).sum(-1).mean().item() * outside_weight
@@ -526,13 +524,17 @@ class RNaD:
                     entropy_target_ += (
                         torch.where(
                             valid.unsqueeze(-1).repeat(1, 1, 9),
-                            torch.where(legal_actions, pi_target * (torch.log(pi_target) - log_legal), 0),
+                            torch.where(
+                                legal_actions,
+                                pi_target * (torch.log(pi_target) - log_legal),
+                                0,
+                            ),
                             torch.zeros_like(legal_actions),
                         )
                     ).sum(-1).mean().item() * outside_weight
             # end chunk loop
 
-            assert((weight_total - 1)**2 < .001**2)
+            assert (weight_total - 1) ** 2 < 0.001**2
 
             if self.n % log_mod == 0 and self.wandb:
 
@@ -668,14 +670,14 @@ if __name__ == "__main__":
         lr=5 * 10**-4,
         gamma_averaging=0.01,
         batch_size=batch_size,
-        buffer_retain=.9,
+        buffer_retain=0.9,
         epsilon_threshold=0.05,
         n_discrete=24,
         # directory_name=f"BasketNet4Test-{int(time.time())}",
         directory_name="cleffa",
         replay_buffer_size=batch_size * 1.2,
         net_init_params={
-            "type": "BasketNet4",
+            "type": "BasketNet",
             "depth_body": 2,
             "depth_policy_cross": 1,
             "depth_policy_self": 1,
@@ -707,6 +709,6 @@ if __name__ == "__main__":
         n_players_per_worker,
         minutes_per_worker_reset,
         n_chunks=16,
-        checkpoint_mod=10,
+        checkpoint_mod=50,
         log_mod=1,
     )

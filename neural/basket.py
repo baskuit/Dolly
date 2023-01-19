@@ -1,6 +1,7 @@
 import torch.nn as nn
 from _torch.nn.activation import MultiheadAttention
 import neural.attention
+import neural.dot_scaled_linear
 
 from poke_env.data import (
     POKEDEX_STOI,
@@ -62,7 +63,7 @@ def _legal_policy(logits: torch.Tensor, legal_actions: torch.Tensor) -> torch.Te
         legal_actions, torch.exp(logits), 0
     )  # Illegal actions become 0.
     exp_logits_sum = torch.sum(exp_logits, axis=-1, keepdim=True)
-    policy = exp_logits / exp_logits_sum
+    policy = torch.where(legal_actions, exp_logits / exp_logits_sum, 0)
     return policy
 
 
@@ -93,60 +94,55 @@ class ObservationEncoder(nn.Module):
 
     def __init__(
         self,
-        move_features=64,
-        our_active_features=2**9,
-        our_bench_features=2**8,
-        opp_active_features=2**9,
-        opp_bench_features=2**8,
+        move_features=2**4,
+        our_active_features=2**7,
+        our_bench_features=2**6,
+        opp_active_features=2**7,
+        opp_bench_features=2**6,
+        dex_=8,
+        m_id=8,
+        m_pp=4,
+        moveslot_=16,
+        stat_=16,
+        hp_=8,
+        status_=4,
+        weather_=8,
+        slot_=16,
+        item_=4,
+        ability_=8,
+        boosts_vol_=48,
+        f_public=64,
+        f_private=80,
+        f_active=32,
+        f_field=16,
     ):
         super().__init__()
-        d_ = 8
-        m_id = 8
-        m_pp = 4
-        ms_ = 32
-        s_ = 32
-        hp_ = 4  # 8 TODO
-        status_ = 4
 
-        self.dex_emb = nn.Embedding(len(POKEDEX_STOI) + 1, d_)
-
+        self.dex_emb = nn.Embedding(len(POKEDEX_STOI) + 1, dex_)
         self.move_id_emb = nn.Embedding(len(MOVES_STOI) + 1, m_id)
         self.move_pp_emb = nn.Embedding(65, m_pp)
-        self.move_linear = nn.Linear(
-            m_id + m_pp, move_features, bias=True
-        )  # cus relu right after
-        self.moveset_linear = nn.Linear(move_features, ms_, bias=False)
-
-        self.item_emb = nn.Embedding(len(ITEMS_STOI) + 1, 4)
-        self.ability_emb = nn.Embedding(len(ABILITIES_STOI) + 1, 8)
-
+        self.move_linear = nn.Linear(m_id + m_pp, move_features, bias=True)
+        self.moveset_linear = nn.Linear(move_features, moveslot_, bias=False)
+        self.item_emb = nn.Embedding(len(ITEMS_STOI) + 1, item_)
+        self.ability_emb = nn.Embedding(len(ABILITIES_STOI) + 1, ability_)
         self.hp_linear = nn.Linear(1, hp_, bias=False)
         self.status_emb = nn.Embedding(8, status_)
+        self.stat_linear = nn.Linear(6, stat_, bias=False)
+        # self.dmia_linear = nn.Linear(
+        #     dex_ + moveslot_ + item_ + ability_, dmia_, bias=False
+        # )
+        self.weather_linear = nn.Linear(8, weather_)
+        self.slot_linear = nn.Linear(20, slot_, bias=False)
+        self.boosts_vol_linear = nn.Linear(171, boosts_vol_, bias=False)
 
-        self.stat_linear = nn.Linear(6, s_, bias=False)
-
-        self.dmia_linear = nn.Linear(d_ + ms_ + 4 + 8, 64, bias=False)
-
-        self.weather_linear = nn.Linear(8, 8)
-        self.slot_linear = nn.Linear(20, 16, bias=False)
-
-        # self.boosts_linear = nn.Linear(7, 16, bias=False)
-        # self.vol_linear = nn.Linear(40, 32, bias=False)
-        self.boosts_vol_linear = nn.Linear(171, 48, bias=False)
-
-        # a u v f level
-
-        f_public = 64
-        f_private = 96
-        f_active = 64
-        f_field = 32
-
-        self.public_linear = nn.Linear(64 + hp_ + status_, f_public, bias=False)
-        self.private_linear = nn.Linear(64 + s_, f_private, bias=False)
-        self.active_linear = nn.Linear(48, f_active, bias=False)
-        self.field_linear = nn.Linear(24, f_field, bias=False)
-
-        #
+        self.public_linear = nn.Linear(
+            dex_ + moveslot_ + item_ + ability_ + hp_ + status_, f_public, bias=False
+        )
+        self.private_linear = nn.Linear(
+            dex_ + moveslot_ + item_ + ability_ + stat_, f_private, bias=False
+        )
+        self.active_linear = nn.Linear(boosts_vol_, f_active, bias=False)
+        self.field_linear = nn.Linear(weather_ + slot_, f_field, bias=False)
         self.our_active = nn.Linear(
             f_public + f_private + f_active + f_field, our_active_features
         )
@@ -154,17 +150,11 @@ class ObservationEncoder(nn.Module):
         self.opp_active = nn.Linear(f_public + f_active + f_field, opp_active_features)
         self.opp_bench = nn.Linear(f_public + f_field, opp_bench_features)
 
-        self.our_active_norm = nn.LayerNorm(our_active_features)
-        self.our_bench_norm = nn.LayerNorm(our_bench_features)
-        self.opp_active_norm = nn.LayerNorm(opp_active_features)
-        self.opp_bench_norm = nn.LayerNorm(opp_bench_features)
-
     def forward(self, obs_dict: ObservationTensor):
 
         pub_priv_dex_emb = self.dex_emb(
             torch.cat((obs_dict["public_dex"], obs_dict["private_dex"]), dim=-2)[..., 0]
         )  # (..., 18, d_=8)
-
         all_moves = torch.cat(
             (
                 obs_dict["public_moves"],
@@ -182,13 +172,11 @@ class ObservationEncoder(nn.Module):
             all_moves_linear[..., :18, :], dim=-2
         )  # (..., 18, m_)
         enc_all_moveset = self.moveset_linear(all_moveset_linear)  # (..., 18, ms_)
-
         pub_priv_item_emb = self.item_emb(
             torch.cat((obs_dict["public_item"], obs_dict["private_item"]), dim=-2)[
                 ..., 0
             ]
         )  # (..., 18, i_=4)
-
         pub_priv_ability_emb = self.ability_emb(
             torch.cat(
                 (
@@ -198,40 +186,34 @@ class ObservationEncoder(nn.Module):
                 dim=-2,
             )[..., 0]
         )  # (..., 18, a_=8)
-
-        enc_dmia = self.dmia_linear(
-            torch.cat(
-                (
-                    pub_priv_dex_emb,
-                    enc_all_moveset[..., :18, :],
-                    pub_priv_item_emb,
-                    pub_priv_ability_emb[..., :18, :],
-                ),
-                dim=-1,
-            )
-        )  # (..., 18, 64)
-
-        emb_stats = self.stat_linear(obs_dict["private_stats"])  # (..., 6, 32)
-
+        dmia = torch.cat(
+            (
+                pub_priv_dex_emb,
+                enc_all_moveset[..., :18, :],
+                pub_priv_item_emb,
+                pub_priv_ability_emb[..., :18, :],
+            ),
+            dim=-1,
+        )
         emb_weather = self.weather_linear(obs_dict["weather"])
         emb_slots = self.slot_linear(obs_dict["slot"])  # (..., 2, 16)
-
-        emb_boosts_vol = self.boosts_vol_linear(obs_dict["active_boosts_vol"])
 
         # # # #
 
         enc_public = self.public_linear(
             torch.cat(
                 (
-                    enc_dmia[..., :12, :],
+                    dmia[..., :12, :],
                     self.hp_linear(obs_dict["public_hp"]),
                     self.status_emb(obs_dict["public_status"][..., 0]),
                 ),
                 dim=-1,
             )
         )  # (..., 12, 64)
-        enc_private = torch.cat(
-            (emb_stats, enc_dmia[..., 12:, :]), dim=-1
+        enc_private = self.private_linear(
+            torch.cat(
+                (self.stat_linear(obs_dict["private_stats"]), dmia[..., 12:, :]), dim=-1
+            )
         )  # (..., 6, 96)
         enc_field = self.field_linear(
             torch.cat(
@@ -246,158 +228,132 @@ class ObservationEncoder(nn.Module):
             enc_field, repeats=6, dim=-2
         )  # (..., 12, 32)
         enc_active = self.active_linear(
-            torch.cat((emb_boosts_vol,), dim=-1)
+            torch.cat((self.boosts_vol_linear(obs_dict["active_boosts_vol"]),), dim=-1)
         )  # (..., 2, 64)
 
         # # # #
-        our_active = self.our_active_norm(
-            self.our_active(
-                torch.cat(
-                    (
-                        enc_public[..., :1, :],
-                        enc_private[..., :1, :],
-                        enc_active[..., :1, :],
-                        enc_field[..., :1, :],
-                    ),
-                    dim=-1,
-                )
+        our_active = self.our_active(
+            torch.cat(
+                (
+                    enc_public[..., :1, :],
+                    enc_private[..., :1, :],
+                    enc_active[..., :1, :],
+                    enc_field[..., :1, :],
+                ),
+                dim=-1,
             )
         )
-        our_bench = self.our_bench_norm(
-            self.our_bench(
-                torch.cat(
-                    (
-                        enc_public[..., 1:6, :],
-                        enc_private[..., 1:6, :],
-                        enc_field[..., 1:6, :],
-                    ),
-                    dim=-1,
-                )
+        our_bench = self.our_bench(
+            torch.cat(
+                (
+                    enc_public[..., 1:6, :],
+                    enc_private[..., 1:6, :],
+                    enc_field[..., 1:6, :],
+                ),
+                dim=-1,
             )
         )
-        opp_active = self.opp_active_norm(
-            self.opp_active(
-                torch.cat(
-                    (
-                        enc_public[..., 6:7, :],
-                        enc_active[..., 1:2, :],
-                        enc_field[..., 6:7, :],
-                    ),
-                    dim=-1,
-                )
+        opp_active = self.opp_active(
+            torch.cat(
+                (
+                    enc_public[..., 6:7, :],
+                    enc_active[..., 1:2, :],
+                    enc_field[..., 6:7, :],
+                ),
+                dim=-1,
             )
         )
-        opp_bench = self.opp_bench_norm(
-            self.opp_bench(
-                torch.cat((enc_public[..., 7:, :], enc_field[..., 7:, :]), dim=-1)
-            )
+        opp_bench = self.opp_bench(
+            torch.cat((enc_public[..., 7:, :], enc_field[..., 7:, :]), dim=-1)
         )
 
+        words = [our_active, our_bench, opp_active, opp_bench]
+        words = [torch.nn.functional.normalize(_, dim=-1, p=2) for _ in words]
+        moves = torch.nn.functional.normalize(
+            all_moves_linear[..., 18, :, :], dim=-1, p=2
+        )
         return EncodedObservation(
-            words=[our_active, our_bench, opp_active, opp_bench],
-            moves=all_moves_linear[..., 18, :, :],  # (... 4, m_)
+            words=words,
+            moves=moves,  # (... 4, m_)
         )
 
 
 class PolicyHead(torch.nn.Module):
     def __init__(
         self,
-        col_group_features=(512, 256),
-        row_group_features=(64 + 512, 256),
-        inner_feature_dict=None,
-        outer_dim=2**8,
-        num_heads=1,
-        dropout=0.0,
-        bias=True,
-        batch_first=True,
+        group_features=(2**7, 2**6, 2**7, 2**6),
+        depth_1=1,
+        depth_2=1,
+        dot_dim_scale_1=0.5,
+        dot_dim_scale_2=0.5,
+        tower_dim=2**8,
+        logit_dim=2**9,
+        move_features=32,
+        bench_features=2**8,
     ) -> None:
 
         super().__init__()
 
-        self.m_groups = len(row_group_features)
-        self.n_groups = len(col_group_features)
+        self.move_linear = torch.nn.Linear(move_features, tower_dim)
+        self.switch_linear = torch.nn.Linear(bench_features, tower_dim)
+        self.logit_linear_1 = torch.nn.Linear(tower_dim, logit_dim)
+        self.logit_linear_2 = torch.nn.Linear(logit_dim, 1)
 
-        if inner_feature_dict is None:
-            inner_feature_dict = {}
-            for a in range(self.m_groups):
-                f = row_group_features[a]
-                for b in range(self.n_groups):
-                    g = col_group_features[b]
-                    inner_feature_dict[(a, b)] = min(f, g)
-
-        self.class_attn_modules = torch.nn.ParameterDict(
-            {
-                f"({a}, {b})": MultiheadAttention(
-                    embed_dim=row_group_features[a],
-                    inner_dim=inner_feature_dict[(a, b)],
-                    outer_dim=inner_feature_dict[(a, b)],
-                    kdim=col_group_features[b],
-                    vdim=col_group_features[b],
-                    output_dim=outer_dim,
-                    num_heads=num_heads,
-                    dropout=dropout,
-                    bias=bias,
-                    batch_first=batch_first,
-                )
-                for a, b in neural.attention.prod(self.m_groups, self.n_groups)
-            }
+        self.tower1 = neural.dot_scaled_linear.CrossDSLTower(
+            depth=depth_1,
+            row_dims=(tower_dim, tower_dim),
+            col_dims=group_features,
+            dot_dim_scale=dot_dim_scale_1,
+            group_lengths=(4, 5),
+        )
+        self.tower2 = neural.dot_scaled_linear.SelfDSLTower(
+            depth=depth_2,
+            row_dims=(tower_dim, tower_dim),
+            dot_dim_scale=dot_dim_scale_2,
+            group_lengths=(4, 5),
         )
 
-        self.logit_layer = neural.attention.GroupedMultiheadSelfAttention(
-            group_features=(outer_dim, outer_dim),
-            output_features=(1, 1),
-            num_heads=num_heads,
-            batch_first=batch_first,
-            dropout=dropout,
-            bias=bias,
+        self.norm_move = torch.nn.LayerNorm((4, tower_dim))
+        self.norm_switch = torch.nn.LayerNorm((5, tower_dim))
+        self.norm_tower_out = torch.nn.LayerNorm((9, tower_dim))
+
+    def forward(self, active_moves, latent_words):
+        latent_our_bench = latent_words[1]
+        tower_in = [
+            self.norm_move(self.move_linear(active_moves)),
+            self.norm_switch(self.switch_linear(latent_our_bench)),
+        ]
+        tower_out = self.norm_tower_out(
+            torch.cat(self.tower2(self.tower1(tower_in, latent_words)), dim=-2)
         )
-
-    def forward(self, words: List[torch.Tensor], cross_words: List[torch.Tensor]):
-        words_ = []
-        for a in range(self.m_groups):
-            n, batch, _ = words[a].shape
-            # Duplicate code to SelfAttention...
-
-            group_outputs = torch.empty(
-                size=(n, batch, 256, self.n_groups), device=words[a].device
-            )
-            group_weights = torch.empty(
-                size=(n, batch, 1, self.n_groups), device=words[a].device
-            )
-
-            for b in range(self.n_groups):
-                layer = self.class_attn_modules[f"({a}, {b})"]
-                attn_outputs, logits = layer(words[a], cross_words[b], cross_words[b])
-                group_outputs[..., b] = attn_outputs
-                group_weights[..., 0, b] = torch.sum(torch.exp(logits), dim=-1)
-            group_weights = torch.nn.functional.normalize(group_weights, dim=-1, p=1)
-
-            group_outputs *= group_weights
-            words_.append(torch.relu(torch.sum(group_outputs, dim=-1)))
-
-        words_ = self.logit_layer(words_)
-        logits = torch.cat(words_, dim=-2)[..., 0]
+        pre_logits = self.logit_linear_1(tower_out)
+        logits = self.logit_linear_2(torch.relu(pre_logits))[..., 0]
         return logits
 
 
 class ValueHead(torch.nn.Module):
     def __init__(
         self,
+        depth=2,
+        group_features=(2**7, 2**6, 2**7, 2**6),
+        dot_dim_scale=0.5,
+        value_dim=2**8,
     ) -> None:
         super().__init__()
-        attn_features = 2**6
-        self.attention = neural.attention.GroupedMultiheadSelfAttention(
-            output_features=(attn_features,) * 4,
+        self.tower = neural.dot_scaled_linear.SelfDSLTower(
+            depth=depth,
+            row_dims=group_features,
+            dot_dim_scale=dot_dim_scale,
         )
-        inner_features = 2**8
-        self.linear_inner = torch.nn.Linear(attn_features * 12, inner_features)
-        self.linear_outer = torch.nn.Linear(inner_features, 1)
+        self.linear_inner = torch.nn.Linear(
+            2 * group_features[0] + 10 * group_features[1], value_dim
+        )
+        self.linear_outer = torch.nn.Linear(value_dim, 1)
 
     def forward(self, words):
-        words_ = torch.relu(
-            torch.flatten(torch.cat(self.attention(words), dim=-2), -2, -1)
-        )
-        inner = torch.relu(self.linear_inner(words_))
+        words = self.tower(words)
+        blob = torch.concat([torch.flatten(w, -2, -1) for w in words], dim=-1)
+        inner = torch.relu(self.linear_inner(blob))
         value = self.linear_outer(inner)
         return value
 
@@ -405,15 +361,18 @@ class ValueHead(torch.nn.Module):
 class BasketNet(nn.Module):
     def __init__(
         self,
-        depth=3,
-        group_features=(2**9, 2**8, 2**9, 2**8),
-        move_features=64,
-        inner_feature_dict=None,
-        num_heads=1,
-        feed_forward_features=(2**10, 2**9, 2**10, 2**9),
-        dropout=0.1,
-        bias=True,
-        batch_first=True,
+        depth_body=2,
+        depth_policy_cross=1,
+        depth_policy_self=1,
+        depth_value=1,
+        group_features=(2**7, 2**6, 2**7, 2**6),
+        move_features=16,
+        dot_dim_scale_body=1,
+        dot_dim_scale_value=1,
+        dot_dim_scale_policy=1,
+        policy_tower_dim=2**6,
+        logit_dim=2**10,
+        value_dim=2**10,
     ) -> None:
         super().__init__()
 
@@ -424,7 +383,7 @@ class BasketNet(nn.Module):
             opp_bench_features,
         ) = group_features
 
-        self.max_traj_split = 32
+        self.max_traj_split = 64
         self.max_batch_split = 16
 
         self.pre = ObservationEncoder(
@@ -434,30 +393,30 @@ class BasketNet(nn.Module):
             opp_bench_features=opp_bench_features,
             opp_active_features=opp_active_features,
         )
-        self.body = neural.attention.GroupedTransformerEncoderBody(
-            depth=depth,
-            group_features=group_features,
-            inner_feature_dict=inner_feature_dict,
-            num_heads=num_heads,
-            feed_forward_features=feed_forward_features,
-            dropout=dropout,
-            batch_first=batch_first,
-            bias=bias,
+        self.body = neural.dot_scaled_linear.SelfDSLTower(
+            depth=depth_body,
+            row_dims=group_features,
+            dot_dim_scale=dot_dim_scale_body,
         )
         self.policy_head = PolicyHead(
-            col_group_features=group_features[-2:],
-            row_group_features=(
-                move_features + our_active_features,
-                our_bench_features,
-            ),
-            batch_first=batch_first,
-            bias=bias,
-            dropout=dropout,
-            num_heads=1,
+            group_features=group_features,
+            depth_1=depth_policy_cross,
+            depth_2=depth_policy_self,
+            dot_dim_scale_1=dot_dim_scale_policy,
+            dot_dim_scale_2=dot_dim_scale_policy,
+            tower_dim=policy_tower_dim,
+            logit_dim=logit_dim,
+            move_features=move_features,
+            bench_features=group_features[1],
         )
-        self.value_head = ValueHead()
+        self.value_head = ValueHead(
+            depth=depth_value,
+            group_features=group_features,
+            dot_dim_scale=dot_dim_scale_value,
+            value_dim=value_dim,
+        )
 
-    def forward(self, obs_dict: dict, as_list: bool = False):
+    def forward(self, obs_dict: dict):
 
         T, B, *_ = obs_dict["active_boosts_vol"].shape
         encoded_obs: EncodedObservation = self.pre.forward(obs_dict)
@@ -467,20 +426,8 @@ class BasketNet(nn.Module):
         )
         latent_moves = encoded_obs.moves
         latent_words = self.body(encoded_obs.words)
-        (
-            latent_our_active,
-            latent_our_bench,
-            latent_opp_active,
-            latent_opp_bench,
-        ) = latent_words
-        latent_active_moves = torch.cat(
-            [latent_moves, latent_our_active.expand(T * B, 4, 512)], dim=-1
-        )
 
-        logits = self.policy_head(
-            [latent_active_moves, latent_our_bench],
-            [latent_opp_active, latent_opp_bench],
-        )
+        logits = self.policy_head(latent_moves, latent_words)
         policy = _legal_policy(logits, obs_dict["legal_actions"].flatten(0, 1))
         log_policy = legal_log_policy(logits, obs_dict["legal_actions"].flatten(0, 1))
         value = self.value_head(latent_words)
@@ -490,9 +437,6 @@ class BasketNet(nn.Module):
             log_policy=log_policy.view(T, B, 9),
             logits=logits.view(T, B, 9),
         )
-
-        if as_list:
-            return Inference(*list(predictions.values()))
         return predictions
 
     @torch.no_grad()
@@ -598,12 +542,6 @@ class BasketNet(nn.Module):
                     for has_played in has_playeds
                 ]
 
-                loss_v = get_loss_v(
-                    [predictions["value"]] * 2,
-                    minibatch_value_target,
-                    minibatch_has_played,
-                )
-
                 minibatch_policy_target = [
                     policy_target[
                         self.max_traj_split * t : self.max_traj_split * (t + 1),
@@ -631,32 +569,43 @@ class BasketNet(nn.Module):
                     for isc in importance_sampling_corrections
                 ]
 
-                loss_nerd = get_loss_nerd(
-                    [predictions["logits"]] * 2,
-                    [predictions["policy"]] * 2,
-                    minibatch_policy_target,
-                    minibatch_valid,
-                    minibatch_player_id,
-                    minibatch_legal_actions,
-                    minibatch_isc,
-                    clip=clip,
-                    threshold=threshold,
+                accumulation_step_weight = minibatch_valid.sum() / total_value
+                loss_weight = accumulation_step_weight.item() * outside_weight
+
+                loss_v = (
+                    get_loss_v(
+                        [predictions["value"]] * 2,
+                        minibatch_value_target,
+                        minibatch_has_played,
+                    )
+                    * loss_weight
                 )
 
-                accumulation_step_weight = minibatch_valid.sum() / total_value
+                loss_nerd = (
+                    get_loss_nerd(
+                        [predictions["logits"]] * 2,
+                        [predictions["policy"]] * 2,
+                        minibatch_policy_target,
+                        minibatch_valid,
+                        minibatch_player_id,
+                        minibatch_legal_actions,
+                        minibatch_isc,
+                        clip=clip,
+                        threshold=threshold,
+                    )
+                    * loss_weight
+                )
 
                 loss = loss_v + loss_nerd
                 neurd_losses.append(loss_nerd)
                 value_losses.append(loss_v)
                 total_losses.append(loss)
 
-                loss *= accumulation_step_weight.item()
-                loss *= outside_weight
                 loss.backward()
 
-        neurd_loss = (sum(neurd_losses) / len(neurd_losses)).item()
-        value_loss = (sum(value_losses) / len(value_losses)).item()
-        total_loss = (sum(total_losses) / len(total_losses)).item()
+        neurd_loss = sum(neurd_losses).item()
+        value_loss = sum(value_losses).item()
+        total_loss = sum(total_losses).item()
 
         return value_loss, neurd_loss, total_loss
 
