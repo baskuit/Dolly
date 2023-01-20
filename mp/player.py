@@ -28,7 +28,7 @@ from poke_env.player.player import Player
 from poke_env.player.battle_order import BattleOrder, ForfeitBattleOrder
 
 from rnad.finetuning import FineTuning
-from neural.buffers import ReplayBuffer
+from neural.replay_buffer import ReplayBuffer
 
 
 class ObservationTensor(NamedTuple):

@@ -87,7 +87,7 @@ def renormalize(loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 
 def backpropagate(
-    model,
+    model: torch.nn.Module,
     grad_list_dict,
     batch,
     value_targets,
@@ -207,7 +207,7 @@ def backpropagate(
     neurd_loss = sum(neurd_losses).item()
     value_loss = sum(value_losses).item()
 
-    for key, value in model.named_paramters():
+    for key, value in model.named_parameters():
         if not value.requires_grad:
             continue
         if key not in grad_list_dict:

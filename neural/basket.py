@@ -488,3 +488,14 @@ class BasketNet(nn.Module):
         for self_param, other_param in zip(self.parameters(), other.parameters()):
             grad = self_param - other_param
             self_param.data.sub_(grad * lr)
+
+    def grad_norm(self):
+        total_norm = 0
+        parameters = [
+            p for p in self.parameters() if p.grad is not None and p.requires_grad
+        ]
+        for p in parameters:
+            param_norm = p.grad.detach().data.norm(2)
+            total_norm += param_norm.item() ** 2
+        total_norm = total_norm**0.5
+        return total_norm

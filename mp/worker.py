@@ -3,7 +3,7 @@ import logging
 
 from typing import Any
 
-from neural.buffers import ReplayBuffer
+from neural.replay_buffer import ReplayBuffer
 
 from poke_env import PlayerConfiguration, LocalhostServerConfiguration
 

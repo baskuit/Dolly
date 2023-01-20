@@ -1,5 +1,5 @@
 import torch
-from os import path, mkdir, rmdir, scandir
+from os import path, mkdir, remove, scandir
 from time import sleep, time
 from typing import Dict, List
 
@@ -15,6 +15,7 @@ class ReplayBuffer:
     def __init__(
         self,
         ctx,
+        directory,
         device=torch.device("cpu"),
         sub_batch_size=64,
         max_sub_batch=16,
@@ -26,17 +27,17 @@ class ReplayBuffer:
         self.sub_batch_size = sub_batch_size
         # This is intended to fit in learner memory, so 2**6/7 i guess
         self.max_sub_batch = max_sub_batch
-        self.directory = path.join(path.dirname(path.realpath(__file__)), "buffer")
+        self.directory = path.join(directory, "buffer")
 
-        buffer_size = int(1.2 * sub_batch_size)
+        self.buffer_size = int(1.5 * sub_batch_size)
 
         self.index_cache = self.ctx.Manager().dict()
-        self.done_cache = [self.ctx.Value("i", 0) for i in range(buffer_size)]
-        self.turn_counters = [self.ctx.Value("i", 0) for i in range(buffer_size)]
-        self.full_queue = self.ctx.Queue(maxsize=self.num_buffers)
-        self.free_queue = self.ctx.Queue(maxsize=self.num_buffers)
+        self.done_cache = [self.ctx.Value("i", 0) for i in range(self.buffer_size)]
+        self.turn_counters = [self.ctx.Value("i", 0) for i in range(self.buffer_size)]
+        self.full_queue = self.ctx.Queue(maxsize=self.buffer_size)
+        self.free_queue = self.ctx.Queue(maxsize=self.buffer_size)
 
-        for m in range(buffer_size):
+        for m in range(self.buffer_size):
             self.free_queue.put(m)
 
         self.lock = self.ctx.Lock()
@@ -66,7 +67,9 @@ class ReplayBuffer:
             if f.is_dir()
         ]
 
-        self.buffers = self._create_buffers(self.sub_batch_size)
+        self.buffers = ReplayBuffer._create_buffers(
+            replay_buffer_specs, self.buffer_size
+        )
 
     def get_sub_batches(self, batch_size: int):
 
@@ -90,7 +93,7 @@ class ReplayBuffer:
         self.sub_batches = sorted(self.sub_batches, reverse=True)
         for sub_batch_timestamp in self.sub_batches[self.max_sub_batch :]:
             sub_batch_path = path.join(self.directory, sub_batch_timestamp)
-            rmdir(sub_batch_path)
+            remove(sub_batch_path)
         self.sub_batches = self.sub_batches[: self.max_sub_batch]
 
     def _get_index(self, battle_tag: str) -> int:
@@ -154,6 +157,17 @@ class ReplayBuffer:
         self.buffers["valid"][index][...] = 0
         self.buffers["legal_actions"][index][...] = 1
 
+    def reset(self):
+        self.index_cache = self.ctx.Manager().dict()
+        self.done_cache = [self.ctx.Value("i", 0) for i in range(self.num_buffers)]
+        self.turn_counters = [self.ctx.Value("i", 0) for i in range(self.num_buffers)]
+        self.free_queue = self.ctx.Queue(maxsize=self.num_buffers)
+        self.full_queue = self.ctx.Queue(maxsize=self.num_buffers)
+        for index in range(self.num_buffers):
+            self.free_queue.put(index)
+            self.buffers["valid"][index][...] = 0
+            self.buffers["legal_actions"][index][...] = 1
+
     def _save_live_buffer(
         self,
     ):
@@ -183,7 +197,7 @@ class ReplayBuffer:
                 self._reset_index(index)
                 self.free_queue.put(index)
 
-            sub_batch_timestamp = str(int(time()))
+            sub_batch_timestamp = str(int(time() * 1000))
             file_name = path.join(self.directory, sub_batch_timestamp)
             self.sub_batches.append(sub_batch_timestamp)
             torch.save(batch, file_name)
