@@ -214,7 +214,7 @@ class RNaD:
                 if key not in self.__dict__:
                     params_dict.pop(key)
                     continue
-                
+
                 init_value = self.__dict__[key]
                 if key == "directory_name":
                     params_dict[key] = init_value
@@ -571,7 +571,7 @@ class RNaD:
 
 
 if __name__ == "__main__":
-    batch_size = 2**6
+    batch_size = 2**11
 
     test = RNaD(
         format="gen3sampleteamrandbats",
@@ -581,7 +581,7 @@ if __name__ == "__main__":
         lr=5 * 10**-4,
         gamma_averaging=0.01,
         batch_size=batch_size,
-        sub_batch_size=2**5,
+        sub_batch_size=2**7,
         max_sub_batch=2**2,
         epsilon_threshold=0.05,
         n_discrete=24,
@@ -607,9 +607,9 @@ if __name__ == "__main__":
 
     test._initialize()
 
-    n_workers = 1
+    n_workers = 2
     n_players_per_worker = 8
-    minutes_per_worker_reset = 20
+    minutes_per_worker_reset = 3 * 60
 
     # net/buffer checkpoint params are kwargs in RNaD._learn()
 

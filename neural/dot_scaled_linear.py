@@ -46,14 +46,6 @@ class GroupedDotScaledLinear(torch.nn.Module):
         return output
 
 
-class BatchNormWord(torch.nn.BatchNorm1d):
-    def __init__(self, *args, **kwargs):
-        super(BatchNormWord, self).__init__(*args, **kwargs)
-
-    def apply(self, input):
-        return self(input.swapaxes(-1, -2)).swapaxes(-1, -2)
-
-
 class DSLResBlock(torch.nn.Module):
     def __init__(
         self,
