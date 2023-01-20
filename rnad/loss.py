@@ -1,7 +1,7 @@
 import torch
 
 from typing import Sequence
-
+from math import ceil
 
 def get_loss_v(
     v_list: Sequence[torch.Tensor],
@@ -83,3 +83,135 @@ def renormalize(loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     loss = torch.sum(loss * mask)
     normalization = torch.sum(mask)
     return loss / normalization.clamp(min=1)
+
+def backpropagate (
+    model,
+    grad_list_dict,
+    batch,
+    value_targets,
+    policy_targets,
+    has_playeds,
+    valid: torch.Tensor,
+    player_id: torch.Tensor,
+    legal_actions: torch.Tensor,
+    clip: int = 10_000,
+    threshold: float = 2.0,
+    outside_weight=1,
+):
+    T, B, *_ = batch["public_dex"].shape
+    num_batch_splits = ceil(B / model.max_batch_split)
+    num_traj_splits = ceil(T / model.max_traj_split)
+
+    minibatch_max_len = valid.sum(0)
+    minibatch_max_len = minibatch_max_len.view(
+        num_batch_splits, B // num_batch_splits
+    )
+    minibatch_max_len = minibatch_max_len.max(-1).values.tolist()
+
+    is_vector = torch.unsqueeze(torch.ones_like(valid), dim=-1)
+    importance_sampling_corrections = [is_vector] * 2
+
+    total_value = valid.sum()
+
+    neurd_losses = []
+    value_losses = []
+    total_losses = []
+
+    for b in range(num_batch_splits):
+        min_iter = ceil(minibatch_max_len[b] / model.max_traj_split)
+        for t in range(min(min_iter, num_traj_splits)):
+            minibatch = {
+                key: value[
+                    model.max_traj_split * t : model.max_traj_split * (t + 1),
+                    model.max_batch_split * b : model.max_batch_split * (b + 1),
+                ]
+                for key, value in batch.items()
+            }
+            predictions = model(minibatch)
+
+            minibatch_value_target = [
+                value_target[
+                    model.max_traj_split * t : model.max_traj_split * (t + 1),
+                    model.max_batch_split * b : model.max_batch_split * (b + 1),
+                ]
+                for value_target in value_targets
+            ]
+            minibatch_has_played = [
+                has_played[
+                    model.max_traj_split * t : model.max_traj_split * (t + 1),
+                    model.max_batch_split * b : model.max_batch_split * (b + 1),
+                ]
+                for has_played in has_playeds
+            ]
+
+            minibatch_policy_target = [
+                policy_target[
+                    model.max_traj_split * t : model.max_traj_split * (t + 1),
+                    model.max_batch_split * b : model.max_batch_split * (b + 1),
+                ]
+                for policy_target in policy_targets
+            ]
+            minibatch_valid = valid[
+                model.max_traj_split * t : model.max_traj_split * (t + 1),
+                model.max_batch_split * b : model.max_batch_split * (b + 1),
+            ]
+            minibatch_player_id = player_id[
+                model.max_traj_split * t : model.max_traj_split * (t + 1),
+                model.max_batch_split * b : model.max_batch_split * (b + 1),
+            ]
+            minibatch_legal_actions = legal_actions[
+                model.max_traj_split * t : model.max_traj_split * (t + 1),
+                model.max_batch_split * b : model.max_batch_split * (b + 1),
+            ]
+            minibatch_isc = [
+                isc[
+                    model.max_traj_split * t : model.max_traj_split * (t + 1),
+                    model.max_batch_split * b : model.max_batch_split * (b + 1),
+                ]
+                for isc in importance_sampling_corrections
+            ]
+
+            accumulation_step_weight = minibatch_valid.sum() / total_value
+            loss_weight = accumulation_step_weight.item() * outside_weight
+
+            loss_v = (
+                get_loss_v(
+                    [predictions["value"]] * 2,
+                    minibatch_value_target,
+                    minibatch_has_played,
+                )
+                * loss_weight
+            )
+
+            loss_nerd = (
+                get_loss_nerd(
+                    [predictions["logits"]] * 2,
+                    [predictions["policy"]] * 2,
+                    minibatch_policy_target,
+                    minibatch_valid,
+                    minibatch_player_id,
+                    minibatch_legal_actions,
+                    minibatch_isc,
+                    clip=clip,
+                    threshold=threshold,
+                )
+                * loss_weight
+            )
+
+            loss = loss_v + loss_nerd
+            neurd_losses.append(loss_nerd)
+            value_losses.append(loss_v)
+            total_losses.append(loss)
+
+            loss.backward()
+
+    neurd_loss = sum(neurd_losses).item()
+    value_loss = sum(value_losses).item()
+
+    for key, value in model.named_paramters():
+        if not value.requires_grad: continue
+        if key not in grad_list_dict:
+            grad_list_dict[key] = [value.grad]
+        else:
+            grad_list_dict[key].append(value.grad)
+    return neurd_loss, value_loss

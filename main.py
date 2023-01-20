@@ -18,10 +18,11 @@ from torch import optim
 
 from neural.basket import BasketNet
 from neural.buffer_specs import representation_input_buffer_specs
-from neural.buffers import ReplayBuffer
+from neural.replay_buffer import ReplayBuffer
 
 from rnad.finetuning import FineTuning
 from rnad.vtrace import v_trace, _player_others
+from rnad.loss import backpropagate
 
 from mp.worker import SelfPlayWorker
 from random import randint
@@ -369,64 +370,24 @@ class RNaD:
             alpha = alpha_lambda(self.n, delta_m)
 
             batch_wait_start = time.perf_counter()
-            batches = self.replay_buffer.get_batches(self.batch_size, n_chunks=n_chunks)
             batch_retrieval_time = time.perf_counter() - batch_wait_start
             print(f"batch retrieved in {int(batch_retrieval_time)} sec.")
 
-            print(f"CUDA Mem Alloc'd: {int(torch.cuda.memory_allocated() / 2**20)}")
-            print(f"CUDA Max Mem: {int(torch.cuda.max_memory_allocated() / 2**20)}")
-            torch.cuda.reset_accumulated_memory_stats()
-            free_queue_size = self.replay_buffer.free_queue.qsize()
-            full_queue_size = self.replay_buffer.full_queue.qsize()
-            print(f"Free Queue size: {free_queue_size}")
-            print(f"Full Queue size: {full_queue_size}")
-            print(f"combined: {free_queue_size + full_queue_size}")
-
-            t_effs = [
-                torch.mean(
-                    torch.sum(batch["valid"], dim=0).to(torch.float), dim=0
-                ).item()
-                for batch in batches
-            ]
-            print("t_effs: ", t_effs)
             learn_start_time = time.time()
 
-            valid_total = sum([torch.sum(batch["valid"]).item() for batch in batches])
-            print(f"Valid total: {valid_total}")
-            print(f"Speed: {valid_total / batch_retrieval_time}")
+            gradient_list_dict = {}
+            valid_counts = []
 
-            (
-                weight_total,
-                value_loss_,
-                neurd_loss_,
-                total_loss_,
-                avg_traj_len_,
-                actor_learner_kld_,
-                entropy_,
-                entropy_target_,
-            ) = (0, 0, 0, 0, 0, 0, 0, 0)
-
-            for chunk in range(n_chunks):
-
-                batch = batches[chunk]
-                batch = {
-                    key: value.to(self.learn_device)
-                    for key, value in batch.items()
-                    if torch.is_tensor(value)
-                }
-
-                player_id = batch["player_id"]
-                action_oh = batch["action_oh"]
-                policy = batch["policy"]
-                rewards = batch["rewards"]
-                valid = batch["valid"]
-                valid_sub_total = torch.sum(batch["valid"]).item()
-                outside_weight = valid_sub_total / valid_total
-                weight_total += outside_weight
+            for sub_batch in self.replay_buffer.get_sub_batches(self.batch_size):
+                player_id = sub_batch["player_id"]
+                action_oh = sub_batch["action_oh"]
+                policy = sub_batch["policy"]
+                rewards = sub_batch["rewards"]
+                valid = sub_batch["valid"]
 
                 obs_dict = {
                     key: value
-                    for key, value in batch.items()
+                    for key, value in sub_batch.items()
                     if key in representation_input_buffer_specs
                 }
                 legal_actions = obs_dict["legal_actions"]
@@ -473,7 +434,9 @@ class RNaD:
                     has_played_list.append(has_played)
                     v_trace_policy_target_list.append(policy_target_)
 
-                value_loss, neurd_loss, total_loss = self.net_offline.backpropagate(
+                neurd_loss, value_loss = backpropagate(
+                    self.net_offline,
+                    gradient_list_dict,
                     obs_dict,
                     v_target_list,
                     v_trace_policy_target_list,
@@ -483,74 +446,17 @@ class RNaD:
                     legal_actions,
                     clip=self.neurd_clip,
                     threshold=self.beta,
-                    outside_weight=outside_weight,
+                    outside_weight=1,
                 )
-                # update logs per chunk
-                if self.n % log_mod == 0 and self.wandb:
-                    value_loss_ += value_loss  # already multiplied by outside weight"
-                    neurd_loss_ += neurd_loss
-                    total_loss_ += total_loss
-                    avg_traj_len_ += valid.float().sum(0).mean().item() / n_chunks
-                    actor_learner_kld_ += (
-                        torch.where(
-                            valid.unsqueeze(-1).repeat(1, 1, 9),
-                            torch.where(
-                                legal_actions,
-                                pi * (torch.log(pi) - torch.log(policy)),
-                                0,
-                            ),
-                            torch.zeros_like(legal_actions),
-                        )
-                        .sum(-1)
-                        .mean()
-                        .item()
-                        * outside_weight
-                    )
-                    log_legal = torch.log(
-                        torch.nn.functional.normalize(
-                            legal_actions.to(torch.float), dim=-1, p=1
-                        )
-                    )
-                    entropy_ += (
-                        torch.where(
-                            valid.unsqueeze(-1).repeat(1, 1, 9),
-                            torch.where(
-                                legal_actions, pi * (torch.log(pi) - log_legal), 0
-                            ),
-                            torch.zeros_like(legal_actions),
-                        )
-                    ).sum(-1).mean().item() * outside_weight
 
-                    entropy_target_ += (
-                        torch.where(
-                            valid.unsqueeze(-1).repeat(1, 1, 9),
-                            torch.where(
-                                legal_actions,
-                                pi_target * (torch.log(pi_target) - log_legal),
-                                0,
-                            ),
-                            torch.zeros_like(legal_actions),
-                        )
-                    ).sum(-1).mean().item() * outside_weight
-            # end chunk loop
+                valid_counts.append(valid.sum().item())
 
-            assert (weight_total - 1) ** 2 < 0.001**2
+            valid_total = sum(valid_counts)
+            gradient_weights = [_ / valid_total for _ in valid_counts]
 
-            if self.n % log_mod == 0 and self.wandb:
-
-                to_log = {
-                    "n": self.total_steps,
-                    "loss_v": value_loss_,
-                    "loss_nerd": neurd_loss_,
-                    "loss_total": total_loss_,
-                    "traj_len": avg_traj_len_,
-                    "actor_learner_kld_": actor_learner_kld_,
-                    "entropy_": entropy_,
-                    "entropy_target_": entropy_target_,
-                }
-                wandb.log(to_log, step=self.total_steps)
-                print(avg_traj_len_)
-
+            for key, value in gradient_list_dict:
+                new_grad = sum([weight * grad for weight, grad in zip(gradient_weights, value)])
+                self.net_offline.state_dict()[key].grad = new_grad
             nn.utils.clip_grad_norm_(self.net_offline.parameters(), self.grad_clip)
             self.optimizer.step()
             self.optimizer.zero_grad()
@@ -651,6 +557,13 @@ class RNaD:
             name="Worker Thread",
         )
         threads.append(worker_thread)
+
+        buffer_save_thread = threading.Thread(
+            target=self.replay_buffer.save_loop,
+            args=(),
+            name="Replay Thread",
+        )
+        threads.append(buffer_save_thread)
 
         for thread in threads:
             thread.start()

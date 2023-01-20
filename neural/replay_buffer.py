@@ -1,7 +1,14 @@
 import torch
 from os import path, mkdir, rmdir, scandir
-from time import sleep
-from typing import List
+from time import sleep, time
+from typing import Dict, List
+
+from neural.buffer_specs import replay_buffer_specs, MAX_T
+
+# logging.basicConfig(level=logging.DEBUG)
+# logger = logging.getLogger(__name__)
+
+Buffers = Dict[str, List[torch.Tensor]]
 
 class ReplayBuffer:
     def __init__(
@@ -33,6 +40,7 @@ class ReplayBuffer:
             self.free_queue.put(m)
 
         self.lock = self.ctx.Lock()
+        self.buffers : Buffers = None
 
     @staticmethod
     def _create_buffers(specs, num_buffers: int):
@@ -56,14 +64,9 @@ class ReplayBuffer:
             if f.is_dir()
         ]
 
-        if not self.sub_batches:
-            pass
-        else:
-            pass
+        self.buffers = self._create_buffers(self.sub_batch_size)
 
-        self.buffer = self._create_buffers(self.sub_batch_size)
-
-    def get_batch (self, batch_size: int):
+    def get_sub_batches (self, batch_size: int):
         
         num_sub_batches = batch_size // self.sub_batch_size
         assert(num_sub_batches * self.sub_batch_size == batch_size)
@@ -79,54 +82,9 @@ class ReplayBuffer:
             sub_batch = torch.load(sub_batch_path, map_location=self.device)
             yield sub_batch
 
-            valids = torch.stack([self.buffers["valid"][m] for m in indices])
-            lengths = valids.sum(-1)
-            max_index = lengths.max().item()
-            entry_times = [self.buffers["entry_time"][m] for m in indices]
-
-            indices = list(
-                zip(*sorted(list(zip(lengths.tolist(), indices)), key=lambda x: x[0]))
-            )[1]
-            indices_by_time = list(
-                zip(
-                    *sorted(
-                        list(zip(entry_times, indices)),
-                        key=lambda x: x[0],
-                        reverse=True,
-                    )
-                )
-            )[1]
-
-            batch = {
-                key: torch.stack(
-                    [self.buffers[key][index] for index in indices],
-                    dim=1,
-                )[:max_index]
-                for key in self.buffers
-            }
-            retain_idx = min(batch_size, max(0, int(batch_size * self.retain)))
-            for index in indices_by_time[retain_idx:]:
-                self.reset_index(index)
-                self.free_queue.put(index)
-            for index in indices_by_time[:retain_idx]:
-                self.full_queue.put(index)
-            batch_slice = batch_size // n_chunks
-            batches = [
-                {
-                    k: t[:, chunk * batch_slice : (chunk + 1) * batch_slice].to(
-                        device=self.device, non_blocking=True
-                    )
-                    for k, t in batch.items()
-                }
-                for chunk in range(n_chunks)
-            ]
-            return batches
-
-
         self._pop_sub_batches()
 
     def _pop_sub_batches(self):
-
         self.sub_batches = sorted(self.sub_batches, reverse=True)
         for sub_batch_timestamp in self.sub_batches[self.max_sub_batch:]:
             sub_batch_path = path.join(self.directory, sub_batch_timestamp)
@@ -137,11 +95,9 @@ class ReplayBuffer:
     def _get_index(self, battle_tag: str) -> int:
         if battle_tag in self.index_cache:
             index = self.index_cache[battle_tag]
-
         else:
             index = self.free_queue.get()
             self.index_cache[battle_tag] = index
-
         return index
 
     def store_sample(self, battle_tag: str, step: Dict[str, torch.Tensor]):
@@ -149,13 +105,12 @@ class ReplayBuffer:
         with self.turn_counters[index].get_lock():
             turn = self.turn_counters[index].value
             if turn >= MAX_T:
-                print("store_sample skipped. too long")
+                pass
             else:
                 for key, value in step.items():
                     self.buffers[key][index][turn][...] = value
                 self.buffers["valid"][index][turn][...] = 1
                 self.buffers["rewards"][index][turn][...] = 0
-                self.buffers["entry_time"][index][...] = int(time.time())
             self.turn_counters[index].value += 1
 
     def clean(self, battle_tag):
@@ -163,7 +118,7 @@ class ReplayBuffer:
         with self.done_cache[index].get_lock():
             self.done_cache[index].value = 0
             self.index_cache.pop(battle_tag, None)
-            self.reset_index(index)
+            self._reset_index(index)
         self.free_queue.put(index)
 
     def ammend_reward(self, battle_tag: str, pid: int, reward: int):
@@ -188,16 +143,49 @@ class ReplayBuffer:
                     self.full_queue.put(index)
                 else:
                     self.free_queue.put(index)
-                    self.reset_index(index)
+                    self._reset_index(index)
                 self.done_cache[index].value = 0
                 self.index_cache.pop(battle_tag, None)
-        return
 
-    def reset_index(self, index: int):
+    def _reset_index(self, index: int):
         with self.turn_counters[index].get_lock():
             self.turn_counters[index].value = 0
-        # for key in self.buffers.keys():
-        #     self.buffers[key][index][...] = 0
         self.buffers["valid"][index][...] = 0
         self.buffers["legal_actions"][index][...] = 1
-        self.buffers["entry_time"][index][...] = 0
+
+    def _save_live_buffer(self,):
+
+        sleep(1)  # give worker thread time to acquire
+
+        with self.lock:
+
+            indices = [self.full_queue.get() for _ in range(self.max_sub_batch)]
+
+            valids = torch.stack([self.buffers["valid"][m] for m in indices])
+            lengths = valids.sum(-1)
+
+            indices = list(
+                zip(*sorted(list(zip(lengths.tolist(), indices)), key=lambda x: x[0]))
+            )[1]
+
+            batch = {
+                key: torch.stack(
+                    [self.buffers[key][index] for index in indices],
+                    dim=1,
+                )[:lengths.max().item()]
+                for key in self.buffers
+            }
+
+            for index in indices:
+                self._reset_index(index)
+                self.free_queue.put(index)
+
+            sub_batch_id = str(int(time()))
+            dir_name = path.join(self.directory, sub_batch_id)
+            self.sub_batches.append(sub_batch_id)
+            torch.save(batch, dir_name)
+
+    def save_loop (self,):
+
+        while True:
+            self._save_live_buffer()

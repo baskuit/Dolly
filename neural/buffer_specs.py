@@ -125,14 +125,6 @@ reward_valid_specs = dict(
     ),
 )
 
-time_stamp_specs = dict(
-    entry_time=dict(
-        size=(1,),
-        dtype=torch.int,
-    )
-)
-
 replay_buffer_specs = deepcopy(representation_input_buffer_specs)
 replay_buffer_specs.update(prediction_output_buffer_specs)
 replay_buffer_specs.update(reward_valid_specs)
-replay_buffer_specs.update(time_stamp_specs)
