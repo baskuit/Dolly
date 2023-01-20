@@ -10,26 +10,26 @@ from neural.buffer_specs import replay_buffer_specs, MAX_T
 
 Buffers = Dict[str, List[torch.Tensor]]
 
+
 class ReplayBuffer:
     def __init__(
         self,
         ctx,
-        device=torch.device('cpu'),
+        device=torch.device("cpu"),
         sub_batch_size=64,
         max_sub_batch=16,
     ):
         self.ctx = ctx
         self.device = device
-        max_sub_batch=16,
 
-        self.sub_batches : List[int] = []
+        self.sub_batches: List[int] = []
         self.sub_batch_size = sub_batch_size
         # This is intended to fit in learner memory, so 2**6/7 i guess
         self.max_sub_batch = max_sub_batch
-        self.directory = path.join(
-            path.dirname(path.realpath(__file__)), "buffer"
-        )
+        self.directory = path.join(path.dirname(path.realpath(__file__)), "buffer")
+
         buffer_size = int(1.2 * sub_batch_size)
+
         self.index_cache = self.ctx.Manager().dict()
         self.done_cache = [self.ctx.Value("i", 0) for i in range(buffer_size)]
         self.turn_counters = [self.ctx.Value("i", 0) for i in range(buffer_size)]
@@ -40,7 +40,9 @@ class ReplayBuffer:
             self.free_queue.put(m)
 
         self.lock = self.ctx.Lock()
-        self.buffers : Buffers = None
+        self.buffers: Buffers = None
+
+        self._initialize()
 
     @staticmethod
     def _create_buffers(specs, num_buffers: int):
@@ -66,10 +68,10 @@ class ReplayBuffer:
 
         self.buffers = self._create_buffers(self.sub_batch_size)
 
-    def get_sub_batches (self, batch_size: int):
-        
+    def get_sub_batches(self, batch_size: int):
+
         num_sub_batches = batch_size // self.sub_batch_size
-        assert(num_sub_batches * self.sub_batch_size == batch_size)
+        assert num_sub_batches * self.sub_batch_size == batch_size
 
         while len(self.sub_batches) < num_sub_batches:
             sleep(1)
@@ -86,11 +88,10 @@ class ReplayBuffer:
 
     def _pop_sub_batches(self):
         self.sub_batches = sorted(self.sub_batches, reverse=True)
-        for sub_batch_timestamp in self.sub_batches[self.max_sub_batch:]:
+        for sub_batch_timestamp in self.sub_batches[self.max_sub_batch :]:
             sub_batch_path = path.join(self.directory, sub_batch_timestamp)
             rmdir(sub_batch_path)
-        self.sub_batches = self.sub_batches[:self.max_sub_batch]
-
+        self.sub_batches = self.sub_batches[: self.max_sub_batch]
 
     def _get_index(self, battle_tag: str) -> int:
         if battle_tag in self.index_cache:
@@ -153,7 +154,9 @@ class ReplayBuffer:
         self.buffers["valid"][index][...] = 0
         self.buffers["legal_actions"][index][...] = 1
 
-    def _save_live_buffer(self,):
+    def _save_live_buffer(
+        self,
+    ):
 
         sleep(1)  # give worker thread time to acquire
 
@@ -172,7 +175,7 @@ class ReplayBuffer:
                 key: torch.stack(
                     [self.buffers[key][index] for index in indices],
                     dim=1,
-                )[:lengths.max().item()]
+                )[: lengths.max().item()]
                 for key in self.buffers
             }
 
@@ -180,12 +183,14 @@ class ReplayBuffer:
                 self._reset_index(index)
                 self.free_queue.put(index)
 
-            sub_batch_id = str(int(time()))
-            dir_name = path.join(self.directory, sub_batch_id)
-            self.sub_batches.append(sub_batch_id)
-            torch.save(batch, dir_name)
+            sub_batch_timestamp = str(int(time()))
+            file_name = path.join(self.directory, sub_batch_timestamp)
+            self.sub_batches.append(sub_batch_timestamp)
+            torch.save(batch, file_name)
 
-    def save_loop (self,):
+    def save_loop(
+        self,
+    ):
 
         while True:
             self._save_live_buffer()

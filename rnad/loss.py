@@ -3,6 +3,7 @@ import torch
 from typing import Sequence
 from math import ceil
 
+
 def get_loss_v(
     v_list: Sequence[torch.Tensor],
     v_target_list: Sequence[torch.Tensor],
@@ -84,7 +85,8 @@ def renormalize(loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     normalization = torch.sum(mask)
     return loss / normalization.clamp(min=1)
 
-def backpropagate (
+
+def backpropagate(
     model,
     grad_list_dict,
     batch,
@@ -96,16 +98,13 @@ def backpropagate (
     legal_actions: torch.Tensor,
     clip: int = 10_000,
     threshold: float = 2.0,
-    outside_weight=1,
 ):
     T, B, *_ = batch["public_dex"].shape
     num_batch_splits = ceil(B / model.max_batch_split)
     num_traj_splits = ceil(T / model.max_traj_split)
 
     minibatch_max_len = valid.sum(0)
-    minibatch_max_len = minibatch_max_len.view(
-        num_batch_splits, B // num_batch_splits
-    )
+    minibatch_max_len = minibatch_max_len.view(num_batch_splits, B // num_batch_splits)
     minibatch_max_len = minibatch_max_len.max(-1).values.tolist()
 
     is_vector = torch.unsqueeze(torch.ones_like(valid), dim=-1)
@@ -172,7 +171,7 @@ def backpropagate (
             ]
 
             accumulation_step_weight = minibatch_valid.sum() / total_value
-            loss_weight = accumulation_step_weight.item() * outside_weight
+            loss_weight = accumulation_step_weight.item()
 
             loss_v = (
                 get_loss_v(
@@ -209,9 +208,11 @@ def backpropagate (
     value_loss = sum(value_losses).item()
 
     for key, value in model.named_paramters():
-        if not value.requires_grad: continue
+        if not value.requires_grad:
+            continue
         if key not in grad_list_dict:
             grad_list_dict[key] = [value.grad]
         else:
             grad_list_dict[key].append(value.grad)
+
     return neurd_loss, value_loss

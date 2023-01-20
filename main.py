@@ -46,13 +46,13 @@ class RNaD:
         roh_bar=1,
         c_bar=1,
         batch_size=3 * 2**8,
+        sub_batch_size=2**6,
+        max_sub_batch=0,
         epsilon_threshold=0.03,
         n_discrete=32,
         directory_name=None,
         net_init_params=None,
         gamma_vtrace=1,
-        replay_buffer_size=None,
-        buffer_retain=0,
         bounds=None,
         delta_m=None,
         desc="",
@@ -79,6 +79,8 @@ class RNaD:
         self.rho_bar = roh_bar
         self.c_bar = c_bar
         self.batch_size = batch_size
+        self.sub_batch_size = sub_batch_size
+        self.max_sub_batch = max_sub_batch
         self.epsilon_threshold = epsilon_threshold
         self.n_discrete = n_discrete
         self.gamma_vtrace = gamma_vtrace
@@ -95,12 +97,6 @@ class RNaD:
 
         self.saved_params = list(self.__dict__.keys())
         # Everything above this is saved and loaded
-
-        if replay_buffer_size is None:
-            replay_buffer_size = batch_size
-        self.replay_buffer_size = int(replay_buffer_size)
-
-        self.buffer_retain = buffer_retain
 
         self.learn_device = learn_device
         self.actor_device = actor_device
@@ -119,12 +115,6 @@ class RNaD:
 
         self.finetune = FineTuning()
         self.total_steps = 0
-
-        self.half_trajectory_counter = 0
-
-        self.loss_value = {}
-        self.loss_neurd = {}
-        self.avg_traj_len = {}
 
     def _assert_bounds(self, bounds, delta_m):
         for _, __ in zip(bounds, bounds[1:]):
@@ -255,12 +245,11 @@ class RNaD:
             self._load_logs()
 
         self.replay_buffer = ReplayBuffer(
-            self.ctx,
-            num_buffers=int(self.replay_buffer_size),
-            device=torch.device("cpu"),
-            retain=self.buffer_retain,
+            ctx=self.ctx,
+            device=self.actor_device,
+            sub_batch_size=self.sub_batch_size,
+            max_sub_batch=self.max_sub_batch,
         )
-        print(f"Initialized buffer with size: {self.replay_buffer_size}")
 
         if self.wandb:
             wandb.init(
@@ -273,20 +262,24 @@ class RNaD:
         # e.g. {'type':'FCResNet', 'tower_length'=8}
         if self.net_init_params["type"] == "BasketNet":
             t = BasketNet
-        net_params = {
-            key: value for key, value in self.net_init_params.items() if key != "type"
-        }
-        net_ = t(**net_params)
+
+        new_net = t(
+            **{
+                key: value
+                for key, value in self.net_init_params.items()
+                if key != "type"
+            }
+        )
         if not state_dict is None:
-            net_.load_state_dict(state_dict)
-        net_.eval()
+            new_net.load_state_dict(state_dict)
+        new_net.eval()
         if device is None:
             device = self.learn_device
-        net_.to(device)
+        new_net.to(device)
         print(
-            f'Init {self.net_init_params["type"] } net with {sum([_.numel() for _ in net_.parameters() if _.requires_grad])} params'
+            f'Init {self.net_init_params["type"] } net with {sum([_.numel() for _ in new_net.parameters() if _.requires_grad])} params'
         )
-        return net_
+        return new_net
 
     def _save_checkpoint(self):
         saved_dict = {
@@ -340,16 +333,8 @@ class RNaD:
         except:
             print("_load_logs failed")
 
-    # def _cosine(self, words):
-    #     words = torch.nn.functional.normalize(words[:, :, 1:6, :], p=2, dim=-1)
-    #     words_transposed = torch.transpose(words, -1, -2)
-    #     dot_product = torch.matmul(words, words_transposed)
-    #     means = (torch.sum(dot_product, dim=[-1, -2]) - 5) / 20
-    #     return means
-
     def _learn(
         self,
-        n_chunks=8,
         checkpoint_mod=10,
         log_mod=1,
         first_step=True,
@@ -368,12 +353,6 @@ class RNaD:
                 self._save_checkpoint()
                 print("Done.")
             alpha = alpha_lambda(self.n, delta_m)
-
-            batch_wait_start = time.perf_counter()
-            batch_retrieval_time = time.perf_counter() - batch_wait_start
-            print(f"batch retrieved in {int(batch_retrieval_time)} sec.")
-
-            learn_start_time = time.time()
 
             gradient_list_dict = {}
             valid_counts = []
@@ -455,7 +434,9 @@ class RNaD:
             gradient_weights = [_ / valid_total for _ in valid_counts]
 
             for key, value in gradient_list_dict:
-                new_grad = sum([weight * grad for weight, grad in zip(gradient_weights, value)])
+                new_grad = sum(
+                    [weight * grad for weight, grad in zip(gradient_weights, value)]
+                )
                 self.net_offline.state_dict()[key].grad = new_grad
             nn.utils.clip_grad_norm_(self.net_offline.parameters(), self.grad_clip)
             self.optimizer.step()
@@ -476,8 +457,6 @@ class RNaD:
                 self.n = 0
 
             first_step = False
-
-            print(f"learn time: {int(time.time() - learn_start_time)} sec.", "\n")
 
     def _worker_loop(
         self,
@@ -508,7 +487,7 @@ class RNaD:
                         self.net_online,
                         self.replay_buffer,
                     ),
-                    name=repr(worker),  # TODO Doesn't have a name?
+                    name=repr(worker),
                 )
                 self.processes.append(process)
                 self.workers.append(worker)
@@ -519,7 +498,8 @@ class RNaD:
             ###
             time.sleep(minutes_to_reset * 60)
             ###
-            with self.replay_buffer.lock:
+
+            with self.replay_buffer.lock:  # keep since RAM buffer is still doing its thing
                 for process in self.processes:
                     process.terminate()
                 print("Terminating workers")
@@ -573,7 +553,7 @@ class RNaD:
 
 
 if __name__ == "__main__":
-    batch_size = 2**11
+    batch_size = 2**6
 
     test = RNaD(
         format="gen3sampleteamrandbats",
@@ -583,12 +563,12 @@ if __name__ == "__main__":
         lr=5 * 10**-4,
         gamma_averaging=0.01,
         batch_size=batch_size,
-        buffer_retain=0.9,
+        sub_batch_size=2**4,
+        max_sub_batch=2**1,
         epsilon_threshold=0.05,
         n_discrete=24,
-        # directory_name=f"BasketNet4Test-{int(time.time())}",
-        directory_name="cleffa",
-        replay_buffer_size=batch_size * 1.2,
+        directory_name=f"DiskBufferTest-{int(time.time())}",
+        # directory_name="cleffa",
         net_init_params={
             "type": "BasketNet",
             "depth_body": 2,
@@ -604,16 +584,14 @@ if __name__ == "__main__":
             "logit_dim": 2**10,
             "value_dim": 2**10,
         },
-        wandb=True,
-        # gamma_vtrace=0.95,
-        # desc='lr=5e-4, gamma=.01 went bad at m=21 (1000 steps..). Logits are all one hots and values=-1.883. Using paper lr/gamma instead. Also increased n_disc from 16 to 24 and made delta_m start at 500'
+        wandb=False,
     )
 
     test._initialize()
 
-    n_workers = 2
-    n_players_per_worker = 12
-    minutes_per_worker_reset = 60 * 3
+    n_workers = 1
+    n_players_per_worker = 8
+    minutes_per_worker_reset = 2
 
     # net/buffer checkpoint params are kwargs in RNaD._learn()
 
