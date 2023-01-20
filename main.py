@@ -210,6 +210,11 @@ class RNaD:
             params_dict: dict = torch.load(os.path.join(self.directory, "params"))
 
             for key, value in params_dict.items():
+                # remove defunct params
+                if key not in self.__dict__:
+                    params_dict.pop(key)
+                    continue
+                
                 init_value = self.__dict__[key]
                 if key == "directory_name":
                     params_dict[key] = init_value
@@ -228,8 +233,6 @@ class RNaD:
                         print("Checks passed. Using init schedule")
                         params_dict[key] = init_value
                         continue
-                if key == "replay_buffer_size":
-                    continue
                 if key == "desc":
                     if init_value:
                         params_dict[key] = init_value
@@ -239,6 +242,12 @@ class RNaD:
                         f"saved param: {key} differed from init, using saved: {value}"
                     )
                 self.__dict__[key] = value
+
+            # add new params to old save
+            for key in self.saved_params:
+                if key not in params_dict:
+                    params_dict[key] = self.__dict__[key]
+
             torch.save(params_dict, os.path.join(self.directory, "params"))
 
             self._load_checkpoint(self.m, self.n)
@@ -246,6 +255,7 @@ class RNaD:
 
         self.replay_buffer = ReplayBuffer(
             ctx=self.ctx,
+            directory=self.directory,
             device=self.actor_device,
             sub_batch_size=self.sub_batch_size,
             max_sub_batch=self.max_sub_batch,
@@ -358,6 +368,11 @@ class RNaD:
             valid_counts = []
 
             for sub_batch in self.replay_buffer.get_sub_batches(self.batch_size):
+
+                sub_batch = {
+                    key: value.to(self.learn_device) for key, value in sub_batch.items()
+                }
+
                 player_id = sub_batch["player_id"]
                 action_oh = sub_batch["action_oh"]
                 policy = sub_batch["policy"]
@@ -425,7 +440,6 @@ class RNaD:
                     legal_actions,
                     clip=self.neurd_clip,
                     threshold=self.beta,
-                    outside_weight=1,
                 )
 
                 valid_counts.append(valid.sum().item())
@@ -433,11 +447,16 @@ class RNaD:
             valid_total = sum(valid_counts)
             gradient_weights = [_ / valid_total for _ in valid_counts]
 
-            for key, value in gradient_list_dict:
+            print(f"valid counts: {valid_counts}")
+
+            for key, value in gradient_list_dict.items():
+
                 new_grad = sum(
                     [weight * grad for weight, grad in zip(gradient_weights, value)]
                 )
                 self.net_offline.state_dict()[key].grad = new_grad
+
+            print(f"grad norm: {self.net_offline.grad_norm()}")
             nn.utils.clip_grad_norm_(self.net_offline.parameters(), self.grad_clip)
             self.optimizer.step()
             self.optimizer.zero_grad()
@@ -494,7 +513,7 @@ class RNaD:
 
             for process in self.processes:
                 process.start()
-
+            # self.workers[0].run(self.net_online, self.replay_buffer)
             ###
             time.sleep(minutes_to_reset * 60)
             ###
@@ -518,7 +537,6 @@ class RNaD:
         n_workers,
         n_players_per_worker,
         minutes_per_worker_reset=0.5,
-        n_chunks=16,
         checkpoint_mod=10,
         log_mod=1,
     ):
@@ -526,7 +544,7 @@ class RNaD:
 
         learn_thread = threading.Thread(
             target=self._learn,
-            args=(n_chunks, checkpoint_mod, log_mod),
+            args=(checkpoint_mod, log_mod),
             name="Learning Thread",
         )
         threads.append(learn_thread)
@@ -563,8 +581,8 @@ if __name__ == "__main__":
         lr=5 * 10**-4,
         gamma_averaging=0.01,
         batch_size=batch_size,
-        sub_batch_size=2**4,
-        max_sub_batch=2**1,
+        sub_batch_size=2**5,
+        max_sub_batch=2**2,
         epsilon_threshold=0.05,
         n_discrete=24,
         directory_name=f"DiskBufferTest-{int(time.time())}",
@@ -591,7 +609,7 @@ if __name__ == "__main__":
 
     n_workers = 1
     n_players_per_worker = 8
-    minutes_per_worker_reset = 2
+    minutes_per_worker_reset = 20
 
     # net/buffer checkpoint params are kwargs in RNaD._learn()
 
@@ -599,7 +617,6 @@ if __name__ == "__main__":
         n_workers,
         n_players_per_worker,
         minutes_per_worker_reset,
-        n_chunks=16,
         checkpoint_mod=50,
         log_mod=1,
     )
