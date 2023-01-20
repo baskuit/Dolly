@@ -43,6 +43,9 @@ class ReplayBuffer:
         self.lock = self.ctx.Lock()
         self.buffers: Buffers = None
 
+        self.steps_total = self.ctx.Value('i', 0)
+        self.timer = time()
+
         self._initialize()
 
     @staticmethod
@@ -150,6 +153,7 @@ class ReplayBuffer:
                     self._reset_index(index)
                 self.done_cache[index].value = 0
                 self.index_cache.pop(battle_tag, None)
+                self.steps_total.value += turn
 
     def _reset_index(self, index: int):
         with self.turn_counters[index].get_lock():
@@ -176,7 +180,8 @@ class ReplayBuffer:
 
         with self.lock:
 
-            indices = [self.full_queue.get() for _ in range(self.max_sub_batch)]
+
+            indices = [self.full_queue.get() for _ in range(self.sub_batch_size)]
 
             valids = torch.stack([self.buffers["valid"][m] for m in indices])
             lengths = valids.sum(-1)
@@ -201,6 +206,15 @@ class ReplayBuffer:
             file_name = path.join(self.directory, sub_batch_timestamp)
             self.sub_batches.append(sub_batch_timestamp)
             torch.save(batch, file_name)
+
+            total_time = time() - self.timer
+            steps_per_second = round(self.steps_total.value / total_time, 3)
+
+            print(f'inference speed: {steps_per_second} steps/sec')
+            print(f'! {self.steps_total.value}')
+
+            self.steps_total.value = 0
+            self.timer = time()
 
     def save_loop(
         self,
